@@ -1,0 +1,27 @@
+{
+    "1.1.1": {
+        "title": "Non-text Content",
+        "bad_code": "<img src=\"logo.png\">",
+        "good_code": "<img src=\"logo.png\" alt=\"Company Logo\">"
+    },
+    "1.3.1": {
+        "title": "Info and Relationships",
+        "bad_code": "<b>Chapter 1</b>",
+        "good_code": "<h2>Chapter 1</h2>"
+    },
+    "2.4.4": {
+        "title": "Link Purpose (In Context)",
+        "bad_code": "<a href=\"/docs\">Click here</a>",
+        "good_code": "<a href=\"/docs\" aria-label=\"Read the documentation\">Click here</a>"
+    },
+    "3.1.1": {
+        "title": "Language of Page",
+        "bad_code": "<html><head><title>Test</title></head><body></body></html>",
+        "good_code": "<html lang=\"en\"><head><title>Test</title></head><body></body></html>"
+    },
+    "4.1.2": {
+        "title": "Name, Role, Value",
+        "bad_code": "<div class=\"custom-button\" onclick=\"submit()\">Submit</div>",
+        "good_code": "<button class=\"custom-button\" onclick=\"submit()\" type=\"button\">Submit</button>"
+    }
+}

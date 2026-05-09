@@ -45,6 +45,14 @@ class LLMFunctions:
                 print(f"Warning: RAG enabled but {wcag_path} not found. Proceeding without RAG.")
                 self.use_rag = False
 
+            # Load supplementary examples
+            examples_path = os.path.join(base_dir, 'wcag_examples.json')
+            if os.path.exists(examples_path):
+                with open(examples_path, 'r', encoding='utf-8') as f:
+                    self.wcag_examples = json.load(f)
+            else:
+                self.wcag_examples = {}
+
     def get_or_create_collection(self, name):
         try:
             return self.client.get_collection(name=name)
@@ -97,51 +105,54 @@ class LLMFunctions:
         else:
             raise ValueError(f"Unknown provider: {self.provider}")
 
-    def generate_prompt(self, row_index, context_html=None, rag_guidelines=None):
-        system_msg = """You are an assistant who will correct web accessibility issues of a provided website.
-                I will provide you with an incorrect line of HTML. Provide a correction.
-                Here are a few examples:
+    def generate_prompt(self, row_index, context_html=None, rag_guidelines=None, previous_failure=None, dynamic_examples=None):
+        system_msg = """You are an expert web accessibility developer. Your task is to fix HTML accessibility violations.
+You MUST output your fix as a strict JSON object. Do not include markdown formatting like ```json or any conversational text.
 
-                E.g.
-                Incorrect: <h3></h3>
-                Issue: There must be some form of text between heading tags. 
-                Correct: <h3>Some heading text</h3>
-                
-                Incorrect: <img src="image.png">
-                Issue: The images lack an alt description. 
-                Correct: <img src="image.png" alt="Description">
-                
-                Incorrect: <a href=""></a>
-                Correct: <a href="url">Link text</a>
+If you can fix the issue by simply adding, modifying, or removing attributes on the target node, use the "modify_attributes" action. 
+This is the safest method.
+{
+  "action": "modify_attributes",
+  "attributes": {"alt": "A descriptive alt text", "aria-label": "Navigation menu"}
+}
 
-                Incorrect: <div id="accessibilityHome">\n<a aria-label="Accessibility overview" href="https://explore.zoom.us/en/accessibility">Accessibility Overview</a>\n</div>
-                Issue: The links are empty and have no URL or text description. 
-                Correct: <div id="accessibilityHome" role="navigation">\n<a aria-label="Accessibility overview" href="https://explore.zoom.us/en/accessibility">Accessibility Overview</a>\n</div>"""
+If the issue requires structural changes (like changing the tag name, or wrapping the content), use the "replace_html" action.
+{
+  "action": "replace_html",
+  "html": "<button type='button'>Click me</button>"
+}
+"""
 
-        context_str = f"\n        Context (Parent Node): {context_html}" if context_html else ""
-        rag_str = f"\n        Relevant WCAG Guidelines:\n{rag_guidelines}" if rag_guidelines else ""
+        context_str = f"\nContext (Parent Node): {context_html}" if context_html else ""
+        rag_str = f"\nRelevant WCAG Guidelines:\n{rag_guidelines}" if rag_guidelines else ""
+        example_str = f"\nWCAG Code Examples:\n{dynamic_examples}" if dynamic_examples else ""
         
+        failure_str = f"\nWARNING: Your previous attempt failed to fix the issue. Previous attempt: {previous_failure}\nPlease try a different approach." if previous_failure else ""
+
         # Use help field if available (it acts as suggested change)
         help_str = ""
         if 'help' in self.df.columns and pd.notna(self.df['help'][row_index]):
-            help_str = f"\n        Suggested change: {self.df['help'][row_index]}"
+            help_str = f"\nSuggested change: {self.df['help'][row_index]}"
 
         user_msg = f"""
-        Provide a correction for the following HTML to fix the accessibility issue. 
-        Only output the corrected HTML code. Do not add conversational filler.
-        {context_str}
-        {rag_str}
-        Incorrect: {self.df['nodeHtml'][row_index]}
-        Issue: {self.df['description'][row_index]}{help_str}
+Provide a JSON correction for the following HTML to fix the accessibility issue.
+{context_str}
+{rag_str}
+{example_str}
+{failure_str}
+
+Incorrect HTML: {self.df['nodeHtml'][row_index]}
+Issue: {self.df['description'][row_index]}{help_str}
 """
         return system_msg, user_msg
 
-    def get_correction(self, row_index, context_html=None):
+    def get_correction(self, row_index, context_html=None, previous_failure=None):
         node_html = self.df["nodeHtml"][row_index]
         issue_desc = self.df["description"][row_index]
         help_text = self.df["help"][row_index] if 'help' in self.df.columns else ""
         
         rag_guidelines = None
+        dynamic_examples = ""
         
         if self.use_rag:
             # Semantic query instead of question
@@ -158,30 +169,46 @@ class LLMFunctions:
             # Use all 3 retrieved guidelines!
             if results["documents"] and results["documents"][0]:
                 rag_guidelines = "\n".join(results["documents"][0])
+                
+                # Check for dynamic examples
+                for doc in results["documents"][0]:
+                    match = re.search(r"WCAG: (\d+\.\d+\.\d+) :", doc)
+                    if match:
+                        ref_id = match.group(1)
+                        if ref_id in self.wcag_examples:
+                            ex = self.wcag_examples[ref_id]
+                            dynamic_examples += f"Rule {ref_id} ({ex['title']}):\nBad: {ex['bad_code']}\nGood: {ex['good_code']}\n\n"
 
-        cache_key = (node_html, issue_desc, context_html, rag_guidelines)
+        cache_key = (node_html, issue_desc, context_html, rag_guidelines, previous_failure)
 
         if cache_key in self.cache:
             print(f"Using cached correction for row {row_index}")
-            correction = self.cache[cache_key]
-        else:
-            system_msg, user_msg = self.generate_prompt(row_index, context_html, rag_guidelines)
-            response = self.GPT_response(system_msg, user_msg, row_index)
-            print(response)
+            return self.cache[cache_key]
 
-            correct_headers = re.search(r"Correct:\s*(.*)", response, re.IGNORECASE | re.DOTALL)
-            if correct_headers:
-                correction = correct_headers.group(1).strip()
-            else:
-                correction = response.strip()
+        system_msg, user_msg = self.generate_prompt(row_index, context_html, rag_guidelines, previous_failure, dynamic_examples)
+        response = self.GPT_response(system_msg, user_msg, row_index)
+        print("LLM JSON Response:", response)
 
-            if correction.startswith("```html"):
-                correction = correction[7:]
-            if correction.endswith("```"):
-                correction = correction[:-3]
-            correction = correction.strip()
-            
-            self.cache[cache_key] = correction
+        # Clean JSON markdown if the LLM hallucinated it
+        correction = response.strip()
+        if correction.startswith("```json"):
+            correction = correction[7:]
+        elif correction.startswith("```"):
+            correction = correction[3:]
+        if correction.endswith("```"):
+            correction = correction[:-3]
+        correction = correction.strip()
+        
+        try:
+            parsed_json = json.loads(correction)
+            self.cache[cache_key] = parsed_json
+            return parsed_json
+        except json.JSONDecodeError:
+            print(f"Failed to parse JSON from LLM: {correction}")
+            # Fallback format
+            fallback = {"action": "replace_html", "html": node_html}
+            self.cache[cache_key] = fallback
+            return fallback
 
         # Optional: Save guideline details like backend used to do
         if self.use_rag and rag_guidelines:

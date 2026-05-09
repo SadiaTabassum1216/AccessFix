@@ -56,67 +56,65 @@ class CleanGPTModels:
     def calculate_severity_score(self, df, score):
         return df[score].sum()
 
-    def _process_violation(self, index, row, dom_soup):
+    def _process_violation(self, index, row, dom_soup, failed_fixes):
         error_html = row['nodeHtml']
         target_selector = str(row['nodeTarget']).split('|')[0] if pd.notna(row['nodeTarget']) else ""
         
         context_html = None
         if target_selector:
             try:
-                # Try to find the node using the selector
                 node = dom_soup.select_one(target_selector)
                 if node and node.parent:
-                    # Provide parent context, but limit length to avoid massive prompts
                     context_html = str(node.parent)[:1000] 
             except Exception as e:
-                print(f"Selector error for {target_selector}: {e}")
+                pass
         
-        fix = self.gpt_functions.get_correction(index, context_html=context_html)
-        return index, target_selector, error_html, fix
+        previous_failure = failed_fixes.get(target_selector, None)
+        fix_json = self.gpt_functions.get_correction(index, context_html=context_html, previous_failure=previous_failure)
+        return index, target_selector, error_html, fix_json
 
-    def create_corrected_dom_column(self, path):
-        print("Correcting DOMs..........")
-
-        with open(path, 'r', encoding='utf-8') as text_file:
-            dom = text_file.read()
-            
+    def apply_fixes_to_dom(self, dom, failed_fixes):
         from bs4 import BeautifulSoup
         import concurrent.futures
         
         soup = BeautifulSoup(dom, 'html.parser')
-        
         results = []
+        attempted_fixes = {}
+        
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             future_to_index = {
-                executor.submit(self._process_violation, index, row, soup): index
+                executor.submit(self._process_violation, index, row, soup, failed_fixes): index
                 for index, row in self.input_df.iterrows()
             }
             for future in concurrent.futures.as_completed(future_to_index):
                 results.append(future.result())
                 
-        # Now apply the fixes to the soup
-        for index, target_selector, error_html, fix in results:
-            if fix == error_html:
-                continue # No change
+        # Now apply the JSON fixes to the soup
+        for index, target_selector, error_html, fix_json in results:
+            if not isinstance(fix_json, dict):
+                continue
                 
-            replaced = False
+            attempted_fixes[target_selector] = fix_json
+                
             if target_selector:
                 try:
                     node = soup.select_one(target_selector)
                     if node:
-                        new_node = BeautifulSoup(fix, 'html.parser')
-                        node.replace_with(new_node)
-                        replaced = True
+                        action = fix_json.get("action", "")
+                        if action == "modify_attributes" and "attributes" in fix_json:
+                            # Safely inject attributes
+                            for attr, val in fix_json["attributes"].items():
+                                node[attr] = val
+                        elif action == "replace_html" and "html" in fix_json:
+                            # Replace structurally
+                            new_node = BeautifulSoup(fix_json["html"], 'html.parser')
+                            node.replace_with(new_node)
                 except Exception as e:
-                    print(f"Error replacing node with selector {target_selector}: {e}")
-            
-            # Fallback to string replacement if BS4 selector fails
-            if not replaced:
-                dom = str(soup)
-                dom = dom.replace(error_html, fix)
-                soup = BeautifulSoup(dom, 'html.parser')
+                    print(f"Error applying JSON fix to {target_selector}: {e}")
 
-        self.input_df['DOMCorrected'] = str(soup)
+        corrected_dom = str(soup)
+        self.input_df['DOMCorrected'] = corrected_dom
+        return corrected_dom, attempted_fixes
 
     def remove_files_starting_with(self, pattern):
         files_to_remove = glob.glob(pattern)
@@ -318,15 +316,50 @@ class CleanGPTModels:
         new_df = self.add_severity_score(new_df, 'finalScore', 3)
         return new_df
 
-    def call_corrections2violations(self, url):
-        print("Violation result after corrections.....")
-        df_corrections = pd.DataFrame()
-        dom_corrected = self.input_df.iloc[0]['DOMCorrected']
-        # print("checking", url)
-        df_temp = self.corrections2violations(dom_corrected)
-        df_corrections = pd.concat([df_corrections, df_temp])
-        df_corrections.to_csv('correctionViolations.csv', index=False)
-        return df_corrections
+    def run_agentic_loop(self, url, path, max_iterations=3):
+        print("\n--- Starting Agentic Feedback Loop ---")
+        self.create_test_script(url, path)
+        self.input_df = self.add_severity_score(self.input_df, 'initialScore', 5)
+        
+        total_initial_severity_score = self.calculate_severity_score(self.input_df, 'initialScore')
+        print(f"Total Initial Violations: {len(self.input_df)}")
+        print(f"Total Initial Severity Score: {total_initial_severity_score}")
+
+        with open(path, 'r', encoding='utf-8') as text_file:
+            current_dom = text_file.read()
+
+        failed_fixes = {}
+        
+        for iteration in range(max_iterations):
+            if self.input_df.empty or len(self.input_df) == 0 or self.input_df.iloc[0]['id'] == 'None':
+                print(f"All violations resolved!")
+                break
+                
+            print(f"\n[Iteration {iteration+1}/{max_iterations}] Attempting fixes...")
+            
+            current_dom, attempted_fixes = self.apply_fixes_to_dom(current_dom, failed_fixes)
+            
+            new_df = self.corrections2violations(current_dom)
+            
+            # Check what failed to inform the next loop
+            failed_fixes = {}
+            if not new_df.empty and new_df.iloc[0]['id'] != 'None':
+                for index, row in new_df.iterrows():
+                    target = str(row['nodeTarget']).split('|')[0] if pd.notna(row['nodeTarget']) else ""
+                    if target in attempted_fixes:
+                        failed_fixes[target] = attempted_fixes[target]
+                        print(f"  Fix failed for {target}")
+            
+            self.input_df = new_df
+            print(f"Remaining Violations after Iteration {iteration+1}: {0 if (new_df.empty or new_df.iloc[0]['id'] == 'None') else len(self.input_df)}")
+
+        # Save final dom
+        corrected_path = os.path.join('data', 'corrected.html')
+        os.makedirs('data', exist_ok=True)
+        with open(corrected_path, 'w', encoding='utf-8') as corrected_file:
+            corrected_file.write(current_dom)
+            
+        return total_initial_severity_score, self.input_df
 
 
 
@@ -338,24 +371,21 @@ def main():
     fetch_and_save_data(url, path)  # web scrape
 
     model = CleanGPTModels()
-    model.create_test_script(url,path)   # find violations
+    initial_score, final_df = model.run_agentic_loop(url, path, max_iterations=3)
 
+    if final_df.empty or final_df.iloc[0]['id'] == 'None':
+        final_score = 0
+    else:
+        final_score = model.calculate_severity_score(final_df, 'finalScore')
 
-    model.input_df = model.add_severity_score(model.input_df, 'initialScore', 5)
-
-    print("total # of violations: ", len(model.input_df))
-
-    total_initial_severity_score = model.calculate_severity_score(model.input_df, 'initialScore')
-    print("total initial severity score: ", total_initial_severity_score)
-
-    model.create_corrected_dom_column(path)
-    result_df = model.call_corrections2violations(url)
-
-    total_final_severity_score = model.calculate_severity_score(result_df, 'finalScore')
-    print("total final severity score: ", total_final_severity_score)
-
-    total_improvement = ((1 - (total_final_severity_score / total_initial_severity_score)) * 100)
-    print("total improvement: ", total_improvement, "%")
+    print("\n--- Final Results ---")
+    print(f"Initial Score: {initial_score}")
+    print(f"Final Score: {final_score}")
+    if initial_score > 0:
+        improvement = ((1 - (final_score / initial_score)) * 100)
+        print(f"Total Improvement: {improvement:.2f}%")
+    
+    final_df.to_csv('correctionViolations.csv', index=False)
 
 if __name__ == "__main__":
     main()
