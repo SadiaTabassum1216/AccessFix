@@ -1,0 +1,218 @@
+import pandas as pd
+import os
+import platform
+import time
+import glob
+import subprocess
+from dotenv import load_dotenv
+from backend.llm_functions import LLMFunctions
+from backend.web_scrapper_and_file_handler import fetch_and_save_data
+
+def run_playwright_test():
+    try:
+        env = os.environ.copy()
+        env['CI'] = '1'
+        if platform.system() == 'Windows':
+            subprocess.run('npx playwright test', shell=True, check=True, env=env)
+        else:
+            subprocess.run('npx playwright test', shell=True, check=True, env=env)
+    except subprocess.CalledProcessError as e:
+        print(f"Error running Playwright test: {e}")
+
+class AccessFixEngine:
+    def __init__(self):
+        load_dotenv()
+        self.gpt_functions = LLMFunctions(provider='ollama', model='codegemma:latest')
+        
+        if not os.path.exists('violationsWithFixedContent.csv'):
+            with open('violationsWithFixedContent.csv', 'w') as file:
+                file.write('id,impact,tags,description,help,helpUrl,nodeImpact,nodeHtml,nodeTarget,nodeType,message,numViolation\n')
+        
+        self.input_df = pd.read_csv('violationsWithFixedContent.csv')
+
+    def add_severity_score(self, df, column_name, insert_index):
+        impact_values = {
+            'critical': 5, 'serious': 4, 'moderate': 3, 'minor': 2, 'cosmetic': 1,
+        }
+        df['impactValue'] = df['impact'].map(impact_values)
+        if column_name in df.columns:
+            df.drop(columns=[column_name], inplace=True)
+        df.insert(insert_index, column_name, df['impactValue'])
+        df.drop(columns='impactValue', inplace=True)
+        return df
+
+    def calculate_severity_score(self, df, score_col):
+        if df.empty or df.iloc[0]['id'] == 'None':
+            return 0
+        return df[score_col].sum()
+
+    def _process_violation(self, index, row, dom_soup, failed_fixes):
+        error_html = row['nodeHtml']
+        target_selector = str(row['nodeTarget']).split('|')[0] if pd.notna(row['nodeTarget']) else ""
+        
+        context_html = None
+        if target_selector:
+            try:
+                node = dom_soup.select_one(target_selector)
+                if node and node.parent:
+                    context_html = str(node.parent)[:1000] 
+            except:
+                pass
+        
+        previous_failure = failed_fixes.get(target_selector, None)
+        fix_json = self.gpt_functions.get_correction(index, context_html=context_html, previous_failure=previous_failure)
+        return index, target_selector, error_html, fix_json
+
+    def apply_fixes_to_dom(self, dom, failed_fixes):
+        from bs4 import BeautifulSoup
+        import concurrent.futures
+        
+        soup = BeautifulSoup(dom, 'html.parser')
+        results = []
+        attempted_fixes = {}
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_index = {
+                executor.submit(self._process_violation, index, row, soup, failed_fixes): index
+                for index, row in self.input_df.iterrows()
+            }
+            for future in concurrent.futures.as_completed(future_to_index):
+                results.append(future.result())
+                
+        for index, target_selector, error_html, fix_json in results:
+            if not isinstance(fix_json, dict): continue
+            attempted_fixes[target_selector] = fix_json
+                
+            if target_selector:
+                try:
+                    node = soup.select_one(target_selector)
+                    if node:
+                        action = fix_json.get("action", "")
+                        if action == "modify_attributes" and "attributes" in fix_json:
+                            for attr, val in fix_json["attributes"].items():
+                                node[attr] = val
+                        elif action == "replace_html" and "html" in fix_json:
+                            new_node = BeautifulSoup(fix_json["html"], 'html.parser')
+                            node.replace_with(new_node)
+                except Exception as e:
+                    print(f"Error applying fix to {target_selector}: {e}")
+
+        corrected_dom = str(soup)
+        self.input_df['DOMCorrected'] = corrected_dom
+        return corrected_dom, attempted_fixes
+
+    def create_test_script(self, path, is_before=True):
+        script_name = "before.spec.ts" if is_before else "after.spec.ts"
+        output_csv = "violationsWithFixedContent.csv" if is_before else "violationsAfter.csv"
+        num_file = "num_violations.txt" if is_before else "num_violations2.txt"
+        
+        with open(path, 'r', encoding='utf-8') as text_file:
+            dom = text_file.read()
+
+        # Handle potential backticks in DOM for template string
+        escaped_dom = dom.replace("`", "\\`").replace("${", "\\${")
+
+        test_script_path = os.path.join("tests", script_name)
+        os.makedirs("tests", exist_ok=True)
+        
+        with open(test_script_path, "w", encoding='utf-8') as f:
+            f.write(f"""
+                const {{ test }} = require('@playwright/test');
+                const AxeBuilder = require('@axe-core/playwright').default;
+                const fs = require('fs');
+
+                function escapeCSV(v) {{
+                    if (typeof v === 'string') {{
+                        v = v.replace(/"/g, '""');
+                        if (v.includes(',') || v.includes('\\n') || v.includes('\\r') || v.includes('"')) return `"${{v}}"`;
+                    }}
+                    return v;
+                }}
+
+                function toCSV(violations) {{
+                    const h = ['id', 'impact', 'tags', 'description', 'help', 'helpUrl', 'nodeImpact', 'nodeHtml', 'nodeTarget', 'nodeType', 'message', 'numViolation'];
+                    let csv = h.join(',') + '\\n';
+                    violations.forEach(v => {{
+                        v.nodes.forEach(n => {{
+                            ['any', 'all', 'none'].forEach(t => {{
+                                if (n[t] && n[t].length > 0) {{
+                                    n[t].forEach(c => {{
+                                        csv += [v.id, v.impact, v.tags.join('|'), v.description, v.help, v.helpUrl, c.impact || '', n.html, n.target.join('|'), t, c.message, violations.length].map(escapeCSV).join(',') + '\\n';
+                                    }});
+                                }}
+                            }});
+                        }});
+                    }});
+                    return csv;
+                }}
+
+                test('scan', async ({{ page }}) => {{
+                    await page.setContent(`{escaped_dom}`);
+                    const results = await new AxeBuilder({{ page }}).analyze();
+                    fs.writeFileSync("{output_csv}", toCSV(results.violations));
+                    fs.writeFileSync("{num_file}", String(results.violations.length));
+                }});
+            """)
+        run_playwright_test()
+
+    def corrections2violations(self, corrected_dom):
+        # Temporary file for scanning
+        temp_path = "temp_scan.html"
+        with open(temp_path, "w", encoding='utf-8') as f:
+            f.write(corrected_dom)
+        
+        self.create_test_script(temp_path, is_before=False)
+        
+        length = 0
+        if os.path.exists('num_violations2.txt'):
+            with open('num_violations2.txt', "r") as f:
+                length = int(f.readline().strip())
+
+        if length > 0 and os.path.exists("violationsAfter.csv"):
+            new_df = pd.read_csv("violationsAfter.csv")
+        else:
+            new_df = pd.DataFrame({'id': ['None'], 'impact': ['None'], 'tags': ['None'], 'description': ['None'], 'help': ['None'], 'helpUrl': ['None'], 'nodeImpact': ['None'], 'nodeHtml': ['None'], 'nodeTarget': ['None'], 'nodeType': ['None'], 'message': ['None'], 'numViolation': [0]})
+
+        if os.path.exists('num_violations2.txt'): os.remove('num_violations2.txt')
+        if os.path.exists('violationsAfter.csv'): os.remove('violationsAfter.csv')
+        if os.path.exists(temp_path): os.remove(temp_path)
+
+        return self.add_severity_score(new_df, 'finalScore', 3)
+
+    def run_agentic_loop(self, url, path, max_iterations=3):
+        print(f"\n--- Starting Agentic Loop for {url} ---")
+        if not os.path.exists(path):
+            fetch_and_save_data(url, path)
+            
+        self.create_test_script(path, is_before=True)
+        self.input_df = self.add_severity_score(self.input_df, 'initialScore', 5)
+        initial_score = self.calculate_severity_score(self.input_df, 'initialScore')
+
+        with open(path, 'r', encoding='utf-8') as f:
+            current_dom = f.read()
+
+        failed_fixes = {}
+        for iteration in range(max_iterations):
+            if self.input_df.empty or self.input_df.iloc[0]['id'] == 'None':
+                print("All violations resolved!")
+                break
+                
+            print(f"Iteration {iteration+1}/{max_iterations}...")
+            current_dom, attempted_fixes = self.apply_fixes_to_dom(current_dom, failed_fixes)
+            new_df = self.corrections2violations(current_dom)
+            
+            failed_fixes = {}
+            if not new_df.empty and new_df.iloc[0]['id'] != 'None':
+                for _, row in new_df.iterrows():
+                    target = str(row['nodeTarget']).split('|')[0] if pd.notna(row['nodeTarget']) else ""
+                    if target in attempted_fixes:
+                        failed_fixes[target] = attempted_fixes[target]
+            
+            self.input_df = new_df
+
+        # Save final result
+        os.makedirs('data', exist_ok=True)
+        with open('data/corrected.html', 'w', encoding='utf-8') as f:
+            f.write(current_dom)
+            
+        return initial_score, self.input_df

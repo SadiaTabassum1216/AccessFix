@@ -2,13 +2,11 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Any
-import logging
-from fixation import analyzeURL, analyzeCode, analyzeCodeFromFile
-from chat import ChatGPT 
+import os
+from backend.engine import AccessFixEngine
 
 app = FastAPI()
-
-# logging.basicConfig(level=logging.INFO)
+engine = AccessFixEngine()
 
 # Configure CORS
 app.add_middleware(
@@ -19,55 +17,75 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 class CodeAnalysisRequest(BaseModel):
     code: str
 
 class UrlAnalysisRequest(BaseModel):
     url: str
-    
-class ChatQuery(BaseModel):
-    code: str
-
-chat_gpt = ChatGPT()
 
 @app.post("/analyzeCode")
 async def analyze_code(request: CodeAnalysisRequest):
     try:
-        # logging.info(f"Received code for analysis: {request.code}")
-        result = analyzeCode(request.code)
-        return result
+        path = os.path.join('data', 'input.html')
+        os.makedirs('data', exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(request.code)
+            
+        initial_score, result_df = engine.run_agentic_loop(None, path)
+        final_score = engine.calculate_severity_score(result_df, 'finalScore')
+        improvement = ((1 - (final_score / initial_score)) * 100) if initial_score > 0 else 0
+
+        return {
+            "total_initial_severity_score": float(initial_score),
+            "total_final_severity_score": float(final_score),
+            "total_improvement": float(improvement),
+            "violations": result_df.to_dict(orient='records')
+        }
     except Exception as e:
-        logging.error(f"Error analyzing code: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/analyzeUrl")
 async def analyze_url(request: UrlAnalysisRequest) -> Any:
     try:
-        # logging.info(f"Received URL for analysis: {request.url}")
-        result = analyzeURL(request.url)
-        return result
+        path = os.path.join('data', 'input.html')
+        initial_score, result_df = engine.run_agentic_loop(request.url, path)
+        
+        final_score = engine.calculate_severity_score(result_df, 'finalScore')
+        improvement = ((1 - (final_score / initial_score)) * 100) if initial_score > 0 else 0
+
+        corrected_html = ""
+        if os.path.exists('data/corrected.html'):
+            with open('data/corrected.html', 'r', encoding='utf-8') as f:
+                corrected_html = f.read()
+
+        return {
+            "total_initial_severity_score": float(initial_score),
+            "total_final_severity_score": float(final_score),
+            "total_improvement": float(improvement),
+            "corrected_html": corrected_html,
+            "violations": result_df.to_dict(orient='records')
+        }
     except Exception as e:
-        logging.error(f"Error analyzing URL: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/analyzeFile")
 async def analyze_file(file: UploadFile = File(...)):
     try:
-        # logging.info(f"Received file content for analysis: {file.filename}")
         content = await file.read()
-        result = analyzeCodeFromFile(content, file.filename)
-        return result
-    except Exception as e:
-        logging.error(f"Error analyzing file content: {e}")
-        raise HTTPException(status_code=500, detail=f"Error analyzing file: {str(e)}")
+        path = os.path.join('data', 'input.html')
+        os.makedirs('data', exist_ok=True)
+        with open(path, 'wb') as f:
+            f.write(content)
+            
+        initial_score, result_df = engine.run_agentic_loop(None, path)
+        final_score = engine.calculate_severity_score(result_df, 'finalScore')
+        improvement = ((1 - (final_score / initial_score)) * 100) if initial_score > 0 else 0
 
-
-@app.post("/chat")
-async def chat_response(query: ChatQuery):
-    try:
-        response = await chat_gpt.generate_response(query.code)
-        return {"text": response}
+        return {
+            "total_initial_severity_score": float(initial_score),
+            "total_final_severity_score": float(final_score),
+            "total_improvement": float(improvement),
+            "violations": result_df.to_dict(orient='records')
+        }
     except Exception as e:
-        print(f"Error: {str(e)}") 
-        return {"error": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))

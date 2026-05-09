@@ -1,84 +1,68 @@
-# AccessFix: Automated Accessibility Validator
+# AccessFix: Agentic Accessibility Engine
 
-AccessFix is an automated pipeline that detects and automatically fixes web accessibility (WCAG) violations using Large Language Models (LLMs). The project features an Angular frontend for user interaction and a FastAPI/Playwright Python backend for execution.
+AccessFix is an automated pipeline that uses LLMs and RAG (Retrieval-Augmented Generation) to detect and fix WCAG accessibility violations. It features an **Agentic Feedback Loop** that rescans corrected HTML to ensure compliance.
 
-## Project Structure
-- `frontend/`: Angular-based user interface.
-- `backend/`: FastAPI server that handles accessibility code scans using Playwright and LLMs via `fixation.py`.
-- `currentTool.py`: Standalone Python script for headless URL scanning and CLI-based pipeline execution.
+## 📁 Repository Structure
 
----
-
-## 🚀 Backend Setup (FastAPI & Playwright)
-
-The backend runs on Python and uses FastAPI to serve endpoints. It requires Playwright for headless browser testing and `ollama` or `openai` for generating the accessibility fixes.
-
-### 1. Navigate to the backend directory
-```powershell
-cd backend
+```text
+/SPL_3
+  /backend          <-- Shared logic & API
+    engine.py       <-- The unified AI Engine (Shared by CLI & API)
+    llm_functions.py <-- LLM/RAG handler
+    main.py         <-- FastAPI Server
+    wcag.json       <-- WCAG knowledge base
+  /frontend         <-- Angular web interface
+  /tests            <-- Playwright scripts
+  /data             <-- HTML storage
+  currentTool.py    <-- CLI Entry Point
+  playwright.config.ts
+  package.json
+  requirements.txt
 ```
 
-### 2. Set up a virtual environment (Recommended)
-```powershell
-python -m venv venv
-# Activate the virtual environment
-.\venv\Scripts\activate
-```
+## 🛠️ Setup
 
-### 3. Install Python dependencies
-```powershell
+### 1. Prerequisites
+- Python 3.10+
+- Node.js (for Playwright)
+- [Ollama](https://ollama.com/) (running `codegemma:latest` and `mxbai-embed-large`)
+
+### 2. Installation
+```bash
+# Install Python dependencies
 pip install -r requirements.txt
-```
 
-### 4. Install Playwright Browsers
-Playwright requires local browser binaries to run the `axe-core` accessibility scans.
-```powershell
+# Install Playwright
+npm install
 npx playwright install
 ```
 
-### 5. Start the Backend Server
-```powershell
-uvicorn main:app --reload
-```
-The backend API will be available at `http://127.0.0.1:8000`.
-
----
-
-## 💻 Frontend Setup (Angular)
-
-The frontend is built with Angular 16 and TailwindCSS.
-
-### 1. Navigate to the frontend directory
-```powershell
-cd frontend
+### 3. Environment
+Create a `.env` file in the root:
+```env
+OPENAI_API_KEY=your_key_here  # Optional if not using Ollama
 ```
 
-### 2. Install Node dependencies
-```powershell
-npm install
-```
+## 🚀 Running AccessFix
 
-### 3. Start the Development Server
-```powershell
-npm start
-```
-The frontend application will be available at `http://localhost:4200`.
-
----
-
-## 🛠️ Standalone CLI Execution (Optional)
-
-If you wish to run the entire pipeline directly via command line without the UI, you can use the `currentTool.py` script located in the root directory.
-
-```powershell
-# Ensure you have your Python virtual environment activated
+### Option A: CLI Mode
+Run the tool directly from your terminal:
+```bash
 python currentTool.py
 ```
 
-### Configuring Models
-By default, the pipeline uses local LLMs via Ollama (`codegemma:latest`). You can edit `currentTool.py` to point to OpenAI models if preferred.
-
-```python
-# In currentTool.py
-self.gpt_functions = LLMFunctions(provider='openai', model='gpt-4o-mini')
+### Option B: Web/API Mode
+Start the FastAPI backend:
+```bash
+# From the root directory
+uvicorn backend.main:app --reload
 ```
+Then start the Angular frontend:
+```bash
+cd frontend
+npm install
+npm start
+```
+
+## 🧠 Methodology
+For a deep dive into the AI architecture, RAG retrieval, and Agentic Loop, see [methodology.md](./methodology.md).
