@@ -6,9 +6,7 @@ import glob
 import subprocess
 import openai
 from dotenv import load_dotenv
-from ollama_functions import LLMFunctions
-from gemma_functions import GemmaFunctions
-from gpt_functions import GPTFunctions
+from llm_functions import LLMFunctions
 from web_scrapper_and_file_handler import fetch_and_save_data
 
 
@@ -31,7 +29,7 @@ def run_playwright_test():
 class CleanGPTModels:
     def __init__(self):
         load_dotenv()
-        self.gpt_functions = LLMFunctions()
+        self.gpt_functions = LLMFunctions(provider='ollama', model='codegemma:latest')
         # openai.api_key = os.getenv('OPENAI_API_KEY')
 
         if not os.path.exists('violationsWithFixedContent.csv'):
@@ -58,24 +56,67 @@ class CleanGPTModels:
     def calculate_severity_score(self, df, score):
         return df[score].sum()
 
+    def _process_violation(self, index, row, dom_soup):
+        error_html = row['nodeHtml']
+        target_selector = str(row['nodeTarget']).split('|')[0] if pd.notna(row['nodeTarget']) else ""
+        
+        context_html = None
+        if target_selector:
+            try:
+                # Try to find the node using the selector
+                node = dom_soup.select_one(target_selector)
+                if node and node.parent:
+                    # Provide parent context, but limit length to avoid massive prompts
+                    context_html = str(node.parent)[:1000] 
+            except Exception as e:
+                print(f"Selector error for {target_selector}: {e}")
+        
+        fix = self.gpt_functions.get_correction(index, context_html=context_html)
+        return index, target_selector, error_html, fix
+
     def create_corrected_dom_column(self, path):
         print("Correcting DOMs..........")
-        error_fix_dict = {}
 
         with open(path, 'r', encoding='utf-8') as text_file:
             dom = text_file.read()
+            
+        from bs4 import BeautifulSoup
+        import concurrent.futures
+        
+        soup = BeautifulSoup(dom, 'html.parser')
+        
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_index = {
+                executor.submit(self._process_violation, index, row, soup): index
+                for index, row in self.input_df.iterrows()
+            }
+            for future in concurrent.futures.as_completed(future_to_index):
+                results.append(future.result())
+                
+        # Now apply the fixes to the soup
+        for index, target_selector, error_html, fix in results:
+            if fix == error_html:
+                continue # No change
+                
+            replaced = False
+            if target_selector:
+                try:
+                    node = soup.select_one(target_selector)
+                    if node:
+                        new_node = BeautifulSoup(fix, 'html.parser')
+                        node.replace_with(new_node)
+                        replaced = True
+                except Exception as e:
+                    print(f"Error replacing node with selector {target_selector}: {e}")
+            
+            # Fallback to string replacement if BS4 selector fails
+            if not replaced:
+                dom = str(soup)
+                dom = dom.replace(error_html, fix)
+                soup = BeautifulSoup(dom, 'html.parser')
 
-        for index, row in self.input_df.iterrows():
-            error = row['nodeHtml']
-            fix = self.gpt_functions.get_correction(index)
-            error_fix_dict[error] = fix
-
-        dom_corrected = dom
-        for error, fix in error_fix_dict.items():
-            dom_corrected = dom_corrected.replace(error[3:-3], fix[3:-3])  # Remove enclosing [[ ]]
-
-        self.input_df['DOMCorrected'] = dom_corrected
-        # self.df.to_csv('corrections.csv', index=False)    #kichu bujhi naaaaaaaaa
+        self.input_df['DOMCorrected'] = str(soup)
 
     def remove_files_starting_with(self, pattern):
         files_to_remove = glob.glob(pattern)
@@ -179,20 +220,58 @@ class CleanGPTModels:
             const AxeBuilder = require('@axe-core/playwright').default;
             const fileReader = require('fs');
 
+            function escapeCSV(value) {{
+                if (typeof value === 'string') {{
+                    value = value.replace(/"/g, '""');
+                    if (value.includes(',') || value.includes('\\n') || value.includes('\\r') || value.includes('"')) {{
+                        return `"${{value}}"`;
+                    }}
+                }}
+                return value;
+            }}
+
+            function violationsToCSV(violations) {{
+                const headers = ['id', 'impact', 'tags', 'description', 'help', 'helpUrl', 'nodeImpact', 'nodeHtml', 'nodeTarget', 'nodeType', 'message', 'numViolation'];
+                let csvContent = headers.join(',') + '\\n';               
+                const totalViolations = violations.length; 
+
+                violations.forEach(violation => {{
+                    violation.nodes.forEach(node => {{
+                        const nodeImpacts = ['any', 'all', 'none'];
+                        nodeImpacts.forEach(impactType => {{
+                            if (node[impactType] && node[impactType].length > 0) {{
+                                node[impactType].forEach(check => {{
+                                    const row = [
+                                        escapeCSV(violation.id),
+                                        escapeCSV(violation.impact),
+                                        escapeCSV(violation.tags.join('|')),
+                                        escapeCSV(violation.description),
+                                        escapeCSV(violation.help),
+                                        escapeCSV(violation.helpUrl),
+                                        escapeCSV(check.impact || ''),
+                                        escapeCSV(node.html),
+                                        escapeCSV(node.target.join('|')),
+                                        escapeCSV(impactType),
+                                        escapeCSV(check.message),
+                                        escapeCSV(totalViolations)
+                                    ];
+                                    csvContent += row.join(',') + '\\n';
+                                }});
+                            }}
+                        }});
+                    }});
+                }});
+                
+                return csvContent;
+            }}
+
             test('all violations', async ({{ page }}) => {{
                 await page.setContent(`{corrected_dom}`)
                 const accessibilityScanResults = await new AxeBuilder({{ page }}).analyze();
                 const violations = accessibilityScanResults.violations;
 
-                fileReader.writeFile("num_violations2.txt", String(violations.length), function(err) {{
-                    if (err) console.log(err);
-                }});
-
-                for (let i = 0; i < violations.length; i++) {{
-                    fileReader.writeFile("data" + i + ".json", JSON.stringify(violations[i]), function(err) {{
-                        if (err) console.log(err);
-                    }});
-                }}
+                fileReader.writeFileSync("violationsAfter.csv", violationsToCSV(violations));
+                fileReader.writeFileSync("num_violations2.txt", String(violations.length));
             }});
             """            
             )
@@ -205,33 +284,23 @@ class CleanGPTModels:
             with open('num_violations2.txt', "r") as length_file:
                 length = int(length_file.readline().strip())
 
-        new_df = pd.DataFrame()
-
-        if length > 0:
-            for i in range(length):
-                df_temp = pd.read_json(f"data{i}.json", lines=True)
-                df_temp = df_temp.reset_index(drop=True)
-                new_df = pd.concat([new_df, df_temp])
-            new_df.insert(1, "numViolations", length)
+        if length > 0 and os.path.exists("violationsAfter.csv"):
+            new_df = pd.read_csv("violationsAfter.csv")
         else:
-            df_temp = pd.DataFrame({
+            new_df = pd.DataFrame({
                 'id': ['None'],
                 'impact': ['None'],
                 'tags': ['None'],
                 'description': ['None'],
                 'help': ['None'],
                 'helpUrl': ['None'],
-                'nodeHtml': ['None'],
                 'nodeImpact': ['None'],
+                'nodeHtml': ['None'],
+                'nodeTarget': ['None'],
                 'nodeType': ['None'],
                 'message': ['None'],          
-                'numViolations': [0]
+                'numViolation': [0]
             })
-            df_temp = df_temp.reset_index(drop=True)
-            new_df = pd.concat([new_df, df_temp])
-
-        new_df = new_df.reset_index(drop=True)
-        self.remove_files_starting_with("data*")
 
         if os.path.exists('num_violations2.txt'):
             try:
@@ -239,6 +308,12 @@ class CleanGPTModels:
             except PermissionError:
                 time.sleep(1)
                 os.remove('num_violations2.txt')
+                
+        if os.path.exists('violationsAfter.csv'):
+            try:
+                os.remove('violationsAfter.csv')
+            except PermissionError:
+                pass
 
         new_df = self.add_severity_score(new_df, 'finalScore', 3)
         return new_df

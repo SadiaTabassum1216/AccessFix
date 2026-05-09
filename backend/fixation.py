@@ -11,7 +11,10 @@ import glob
 import subprocess
 import numpy as np
 from dotenv import load_dotenv
-from LLM_functions import LLMFunctions
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from llm_functions import LLMFunctions
 from web_scrapper import fetch_and_save_data, save_code_to_path
 from file_handler import FileExtractor
 import re
@@ -196,6 +199,24 @@ class CleanGPTModels:
     def calculate_severity_score(self, df, score):
         return df[score].sum()
 
+    def _process_violation(self, index, row, dom_soup):
+        error_html = row['nodeHtml']
+        target_selector = str(row['nodeTarget']).split('|')[0] if pd.notna(row['nodeTarget']) else ""
+        
+        context_html = None
+        if target_selector:
+            try:
+                # Try to find the node using the selector
+                node = dom_soup.select_one(target_selector)
+                if node and node.parent:
+                    # Provide parent context
+                    context_html = str(node.parent)[:1000] 
+            except Exception as e:
+                print(f"Selector error for {target_selector}: {e}")
+        
+        fix = self.gpt_functions.get_correction(index, context_html=context_html)
+        return index, target_selector, error_html, fix
+
     def create_corrected_dom_column(self, path):
         print("Correcting DOMs..........")
 
@@ -204,54 +225,55 @@ class CleanGPTModels:
             self.final_corrected_dom = None
             return
 
-        error_fix_dict = {}
-
-        try:
-            # Read the initial DOM content
-            with open(path, 'r', encoding='utf-8') as text_file:
-                dom = text_file.read()
+        with open(path, 'r', encoding='utf-8') as text_file:
+            dom = text_file.read()
             
-            soup = BeautifulSoup(dom, 'html.parser')
+        import concurrent.futures
+        soup = BeautifulSoup(dom, 'html.parser')
+        
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_index = {
+                executor.submit(self._process_violation, index, row, soup): index
+                for index, row in self.input_df.iterrows()
+            }
+            for future in concurrent.futures.as_completed(future_to_index):
+                results.append(future.result())
+                
+        # Now apply the fixes to the soup
+        for index, target_selector, error_html, fix in results:
+            if not fix or fix == error_html:
+                continue # No change
+                
+            replaced = False
+            if target_selector:
+                try:
+                    node = soup.select_one(target_selector)
+                    if node:
+                        new_node = BeautifulSoup(fix, 'html.parser')
+                        node.replace_with(new_node)
+                        replaced = True
+                except Exception as e:
+                    print(f"Error replacing node with selector {target_selector}: {e}")
             
-            # Iterate through identified errors and prepare fixes
-            for index, row in self.input_df.iterrows():
-                error = ' '.join(row['nodeHtml'].split())
-                error_html = BeautifulSoup(error, 'html.parser')
-                error = str(error_html)
-                # print(f"Error {index}: {error}\n")
+            # Fallback to string replacement if BS4 selector fails
+            if not replaced:
+                dom = str(soup)
+                # Clean up error_html matching old logic just in case
+                error_clean = ' '.join(error_html.split())
+                error_clean = str(BeautifulSoup(error_clean, 'html.parser'))
+                dom = dom.replace(error_clean, fix)
+                soup = BeautifulSoup(dom, 'html.parser')
 
-                fix = self.gpt_functions.get_correction(index)
-                if fix:
-                    fix = fix.strip("'")
-                    # print(f"Fix for error {index}: {fix}\n")
-                    if error and fix and error != fix:
-                        error_fix_dict[error] = fix
+        corrected_dom = str(soup)
+        self.input_df['DOMCorrected'] = corrected_dom
+        self.final_corrected_dom = corrected_dom
 
-            # Apply all collected fixes
-            for error, fix in error_fix_dict.items():
-                dom = dom.replace(error, fix)
-                # print(f"Applying fix: {error}  --> {fix}\n")
-
-            # Convert to BeautifulSoup object for light cleanup and ensure structure is correct
-            corrected_soup = BeautifulSoup(dom, 'html.parser')
-            corrected_dom = str(corrected_soup)
-
-            # print(f"Corrected DOM: {corrected_dom}")
-
-            self.input_df['DOMCorrected'] = corrected_dom
-            self.final_corrected_dom = corrected_dom
-
-            # Save the corrected and minimally altered DOM to file
-            corrected_path = os.path.join('data', 'corrected.html')
-            os.makedirs('data', exist_ok=True)
-            with open(corrected_path, 'w', encoding='utf-8') as corrected_file:
-                corrected_file.write(corrected_dom)
-            # print(f"Corrected DOM saved to {corrected_path}")
-
-        except Exception as e:
-            print(f"Critical error in create_corrected_dom_column: {e}")
-            self.final_corrected_dom = None
-            raise
+        # Save the corrected DOM to file
+        corrected_path = os.path.join('data', 'corrected.html')
+        os.makedirs('data', exist_ok=True)
+        with open(corrected_path, 'w', encoding='utf-8') as corrected_file:
+            corrected_file.write(corrected_dom)
 
 
 
@@ -373,7 +395,7 @@ class CleanGPTModels:
 
         total_initial_severity_score = self.calculate_severity_score(self.input_df, 'initialScore')
 
-        self.gpt_functions = LLMFunctions()
+        self.gpt_functions = LLMFunctions(use_rag=True)
         self.create_corrected_dom_column(path)
         
         dom_corrected = self.input_df.iloc[0]['DOMCorrected']
@@ -420,7 +442,7 @@ class CleanGPTModels:
 
         total_initial_severity_score = self.calculate_severity_score(self.input_df, 'initialScore')
 
-        self.gpt_functions = LLMFunctions()
+        self.gpt_functions = LLMFunctions(use_rag=True)
         self.create_corrected_dom_column(path)
         
         dom_corrected = self.input_df.iloc[0]['DOMCorrected']
