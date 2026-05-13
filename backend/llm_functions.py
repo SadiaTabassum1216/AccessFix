@@ -4,7 +4,7 @@ import re
 import ollama
 import openai
 import json
-import chromadb
+# chromadb is imported dynamically if use_rag is True
 
 class LLMFunctions:
     def __init__(self, provider='ollama', model='codegemma:latest', use_rag=False):
@@ -30,6 +30,7 @@ class LLMFunctions:
         self.cache = {}
 
         if self.use_rag:
+            import chromadb
             self.client = chromadb.Client()
             self.collection = self.get_or_create_collection("wcag_docs")
             

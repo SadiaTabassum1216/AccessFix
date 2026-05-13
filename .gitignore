@@ -9,6 +9,7 @@ myenv
 venv
 .env
 __pycache__
+benchmark
 tests
 num_violations.txt
 violationsWithFixedContent.csv

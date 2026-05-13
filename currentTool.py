@@ -29,9 +29,13 @@ def main():
         print(f"Total Improvement:      {improvement:.2f}%")
     
     # Save results
-    final_df.to_csv('correctionViolations.csv', index=False)
+    results_dir = 'data/results'
+    os.makedirs(results_dir, exist_ok=True)
+    final_csv = os.path.join(results_dir, 'correctionViolations.csv')
+    final_df.to_csv(final_csv, index=False)
+    
     print("\nCorrected DOM saved to data/corrected.html")
-    print("Violation details saved to correctionViolations.csv")
+    print(f"Violation details saved to {final_csv}")
 
 if __name__ == "__main__":
     main()

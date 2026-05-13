@@ -24,11 +24,18 @@ class AccessFixEngine:
         load_dotenv()
         self.gpt_functions = LLMFunctions(provider='ollama', model='codegemma:latest')
         
-        if not os.path.exists('violationsWithFixedContent.csv'):
-            with open('violationsWithFixedContent.csv', 'w') as file:
+        # Centralized temp directory
+        self.temp_dir = 'temp'
+        os.makedirs(self.temp_dir, exist_ok=True)
+        
+        # Temporary violation file path
+        self.violations_csv = os.path.join(self.temp_dir, 'violations.csv')
+        
+        if not os.path.exists(self.violations_csv):
+            with open(self.violations_csv, 'w') as file:
                 file.write('id,impact,tags,description,help,helpUrl,nodeImpact,nodeHtml,nodeTarget,nodeType,message,numViolation\n')
         
-        self.input_df = pd.read_csv('violationsWithFixedContent.csv')
+        self.input_df = pd.read_csv(self.violations_csv)
 
     def add_severity_score(self, df, column_name, insert_index):
         impact_values = {
@@ -103,8 +110,10 @@ class AccessFixEngine:
 
     def create_test_script(self, path, is_before=True):
         script_name = "before.spec.ts" if is_before else "after.spec.ts"
-        output_csv = "violationsWithFixedContent.csv" if is_before else "violationsAfter.csv"
-        num_file = "num_violations.txt" if is_before else "num_violations2.txt"
+        
+        # Ensure paths use forward slashes for the generated JS script
+        output_csv = os.path.join(self.temp_dir, "violations_before.csv" if is_before else "violations_after.csv").replace("\\", "/")
+        num_file = os.path.join(self.temp_dir, "num_v1.txt" if is_before else "num_v2.txt").replace("\\", "/")
         
         with open(path, 'r', encoding='utf-8') as text_file:
             dom = text_file.read()
@@ -163,19 +172,22 @@ class AccessFixEngine:
         
         self.create_test_script(temp_path, is_before=False)
         
+        num_v2_path = os.path.join(self.temp_dir, "num_v2.txt")
+        violations_after_path = os.path.join(self.temp_dir, "violations_after.csv")
+        
         length = 0
-        if os.path.exists('num_violations2.txt'):
-            with open('num_violations2.txt', "r") as f:
+        if os.path.exists(num_v2_path):
+            with open(num_v2_path, "r") as f:
                 length = int(f.readline().strip())
 
-        if length > 0 and os.path.exists("violationsAfter.csv"):
-            new_df = pd.read_csv("violationsAfter.csv")
+        if length > 0 and os.path.exists(violations_after_path):
+            new_df = pd.read_csv(violations_after_path)
         else:
             new_df = pd.DataFrame({'id': ['None'], 'impact': ['None'], 'tags': ['None'], 'description': ['None'], 'help': ['None'], 'helpUrl': ['None'], 'nodeImpact': ['None'], 'nodeHtml': ['None'], 'nodeTarget': ['None'], 'nodeType': ['None'], 'message': ['None'], 'numViolation': [0]})
 
-        if os.path.exists('num_violations2.txt'): os.remove('num_violations2.txt')
-        if os.path.exists('violationsAfter.csv'): os.remove('violationsAfter.csv')
-        if os.path.exists(temp_path): os.remove(temp_path)
+        # Cleanup intermediate files
+        for f in [num_v2_path, violations_after_path, temp_path]:
+            if os.path.exists(f): os.remove(f)
 
         return self.add_severity_score(new_df, 'finalScore', 3)
 
@@ -185,6 +197,9 @@ class AccessFixEngine:
             fetch_and_save_data(url, path)
             
         self.create_test_script(path, is_before=True)
+        violations_v1 = os.path.join(self.temp_dir, 'violations_before.csv')
+        if os.path.exists(violations_v1):
+            self.input_df = pd.read_csv(violations_v1)
         self.input_df = self.add_severity_score(self.input_df, 'initialScore', 5)
         initial_score = self.calculate_severity_score(self.input_df, 'initialScore')
 
@@ -215,4 +230,13 @@ class AccessFixEngine:
         with open('data/corrected.html', 'w', encoding='utf-8') as f:
             f.write(current_dom)
             
+        # Final cleanup of temp directory
+        import shutil
+        if os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir)
+            
+        # Also cleanup root-level artifacts if they exist
+        for root_file in ['violationsWithFixedContent.csv', 'num_violations.txt', 'data0.json']:
+            if os.path.exists(root_file): os.remove(root_file)
+
         return initial_score, self.input_df
