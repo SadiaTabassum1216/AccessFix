@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 import re
+# pyrefly: ignore [missing-import]
 import ollama
 import openai
 import json
@@ -34,17 +35,30 @@ class LLMFunctions:
             
             # Locate wcag.json relative to this file
             base_dir = os.path.dirname(os.path.abspath(__file__))
-            wcag_path = os.path.join(base_dir, 'wcag.json')
+            # Use enriched data if available, otherwise fallback to standard
+            enriched_path = os.path.join(base_dir, 'wcag_enriched.json')
+            standard_path = os.path.join(base_dir, 'wcag.json')
+            
+            wcag_path = enriched_path if os.path.exists(enriched_path) else standard_path
             
             if os.path.exists(wcag_path):
                 with open(wcag_path, 'r', encoding='utf-8') as f:
                     self.wcag_data = json.load(f)
+                
+                # Create a map for fast SC lookup
+                self.sc_map = {}
+                for item in self.wcag_data:
+                    for guideline in item['guidelines']:
+                        for sc in guideline.get('success_criteria', []):
+                            self.sc_map[sc['ref_id']] = sc
+                
                 self.populate_collection()
             else:
                 print(f"Warning: RAG enabled but {wcag_path} not found. Proceeding without RAG.")
                 self.use_rag = False
+                self.sc_map = {}
 
-            # Load supplementary examples
+            # Supplementary examples (fallback)
             examples_path = os.path.join(base_dir, 'wcag_examples.json')
             if os.path.exists(examples_path):
                 with open(examples_path, 'r', encoding='utf-8') as f:
@@ -185,12 +199,17 @@ Issue: {self.df['description'][row_index]}{help_str}
                 reranked_docs = self.reranker.rerank(query_prompt, results["documents"][0], top_k=3)
                 rag_guidelines = "\n".join(reranked_docs)
                 
-                # Check for dynamic examples
+                # Check for dynamic examples in enriched data
                 for doc in reranked_docs:
                     match = re.search(r"WCAG: (\d+\.\d+\.\d+) :", doc)
                     if match:
                         ref_id = match.group(1)
-                        if ref_id in self.wcag_examples:
+                        # Priority 1: Enriched dynamic examples from scraping
+                        if ref_id in self.sc_map and self.sc_map[ref_id].get('dynamic_examples'):
+                            for ex in self.sc_map[ref_id]['dynamic_examples'][:2]: # Take top 2
+                                dynamic_examples += f"Example for {ref_id} ({ex['title']}):\n{ex['description']}\nCode:\n{ex['code']}\n\n"
+                        # Priority 2: Hardcoded examples (fallback)
+                        elif ref_id in self.wcag_examples:
                             ex = self.wcag_examples[ref_id]
                             dynamic_examples += f"Rule {ref_id} ({ex['title']}):\nBad: {ex['bad_code']}\nGood: {ex['good_code']}\n\n"
 
