@@ -9,20 +9,18 @@ from backend.llm_functions import LLMFunctions
 from backend.web_scrapper_and_file_handler import fetch_and_save_data
 
 def run_playwright_test():
+    """Run Playwright tests for accessibility scanning."""
     try:
         env = os.environ.copy()
         env['CI'] = '1'
-        if platform.system() == 'Windows':
-            subprocess.run('npx playwright test', shell=True, check=True, env=env)
-        else:
-            subprocess.run('npx playwright test', shell=True, check=True, env=env)
+        subprocess.run('npx playwright test', shell=True, check=True, env=env)
     except subprocess.CalledProcessError as e:
         print(f"Error running Playwright test: {e}")
 
 class AccessFixEngine:
     def __init__(self):
         load_dotenv()
-        self.gpt_functions = LLMFunctions(provider='ollama', model='codegemma:latest')
+        self.gpt_functions = LLMFunctions(provider='ollama', model='codegemma:latest', use_rag=True)
         
         # Centralized temp directory
         self.temp_dir = 'temp'
@@ -37,7 +35,8 @@ class AccessFixEngine:
         
         self.input_df = pd.read_csv(self.violations_csv)
 
-    def add_severity_score(self, df, column_name, insert_index):
+    def compute_severity_score_column(self, df, column_name, insert_index):
+        """Compute severity scores from impact ratings and insert into dataframe."""
         impact_values = {
             'critical': 5, 'serious': 4, 'moderate': 3, 'minor': 2, 'cosmetic': 1,
         }
@@ -74,6 +73,10 @@ class AccessFixEngine:
         from bs4 import BeautifulSoup
         import concurrent.futures
         
+        # Keep LLM row lookups aligned with the current violation dataframe.
+        self.input_df = self.input_df.reset_index(drop=True)
+        self.gpt_functions.df = self.input_df
+
         soup = BeautifulSoup(dom, 'html.parser')
         results = []
         attempted_fixes = {}
@@ -110,6 +113,9 @@ class AccessFixEngine:
 
     def create_test_script(self, path, is_before=True):
         script_name = "before.spec.ts" if is_before else "after.spec.ts"
+
+        # Temp directory may be removed at the end of a prior case.
+        os.makedirs(self.temp_dir, exist_ok=True)
         
         # Ensure paths use forward slashes for the generated JS script
         output_csv = os.path.join(self.temp_dir, "violations_before.csv" if is_before else "violations_after.csv").replace("\\", "/")
@@ -118,8 +124,8 @@ class AccessFixEngine:
         with open(path, 'r', encoding='utf-8') as text_file:
             dom = text_file.read()
 
-        # Handle potential backticks in DOM for template string
-        escaped_dom = dom.replace("`", "\\`").replace("${", "\\${")
+        # Escape characters that would break JS template literals in generated tests.
+        escaped_dom = dom.replace("\\", "\\\\").replace("`", "\\`").replace("${", "\\${")
 
         test_script_path = os.path.join("tests", script_name)
         os.makedirs("tests", exist_ok=True)
@@ -189,7 +195,7 @@ class AccessFixEngine:
         for f in [num_v2_path, violations_after_path, temp_path]:
             if os.path.exists(f): os.remove(f)
 
-        return self.add_severity_score(new_df, 'finalScore', 3)
+        return self.compute_severity_score_column(new_df, 'finalScore', 3)
 
     def run_agentic_loop(self, url, path, max_iterations=3):
         print(f"\n--- Starting Agentic Loop for {url} ---")
@@ -200,7 +206,7 @@ class AccessFixEngine:
         violations_v1 = os.path.join(self.temp_dir, 'violations_before.csv')
         if os.path.exists(violations_v1):
             self.input_df = pd.read_csv(violations_v1)
-        self.input_df = self.add_severity_score(self.input_df, 'initialScore', 5)
+        self.input_df = self.compute_severity_score_column(self.input_df, 'initialScore', 5)
         initial_score = self.calculate_severity_score(self.input_df, 'initialScore')
 
         with open(path, 'r', encoding='utf-8') as f:

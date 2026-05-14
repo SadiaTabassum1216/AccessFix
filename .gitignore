@@ -8,11 +8,29 @@ data
 myenv
 venv
 .env
+
+# Generated test artifacts
+violationsAfter.csv
+violationsWithFixedContent.csv
+num_violations.txt
+num_violations2.txt
+num_v1.txt
+num_v2.txt
+violations_before.csv
+violations_after.csv
+violationResult.csv
+data0.json
+
+# Playwright test outputs
+test-results/
+playwright-report/
+/temp/
 __pycache__
 benchmark
 tests
 num_violations.txt
 violationsWithFixedContent.csv
+temp
 
 
 violationResult.csv

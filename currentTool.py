@@ -1,9 +1,10 @@
 import pandas as pd
 import os
 from backend.engine import AccessFixEngine
-from backend.web_scrapper_and_file_handler import fetch_and_save_data
+from backend.web_scrapper_and_file_handler import fetch_and_save_html
 
 def main():
+    """CLI entry point for running AccessFix on a single URL."""
     print("AccessFix CLI - Starting...")
     url = 'https://calendar.google.com/'
     path = 'data/input.html'
