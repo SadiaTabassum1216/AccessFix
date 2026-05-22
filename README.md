@@ -1,16 +1,15 @@
-# AccessFix: Agentic Accessibility Engine
+# AccessFix
 
 AccessFix is an automated pipeline that uses LLMs and RAG (Retrieval-Augmented Generation) to detect and fix WCAG accessibility violations. It features an **Agentic Feedback Loop** that rescans corrected HTML to ensure compliance.
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```text
 /SPL_3
   /backend          <-- Shared logic & API
-    engine.py       <-- The unified AI Engine (Shared by CLI & API)
-    llm_functions.py <-- LLM/RAG handler
+    engine.py       <-- The unified AI Engine
+    llm_functions.py <-- Dynamic RAG handler
     main.py         <-- FastAPI Server
-    wcag.json       <-- WCAG knowledge base
   /frontend         <-- Angular web interface
   /tests            <-- Playwright scripts
   /data             <-- HTML storage
@@ -20,7 +19,7 @@ AccessFix is an automated pipeline that uses LLMs and RAG (Retrieval-Augmented G
   requirements.txt
 ```
 
-## 🛠️ Setup
+## Setup
 
 ### 1. Prerequisites
 - Python 3.10+
@@ -37,13 +36,7 @@ npm install
 npx playwright install
 ```
 
-### 3. Environment
-Create a `.env` file in the root:
-```env
-OPENAI_API_KEY=your_key_here  # Optional if not using Ollama
-```
-
-## 🚀 Running AccessFix
+## Running AccessFix
 
 ### Option A: CLI Mode
 Run the tool directly from your terminal:
@@ -63,6 +56,3 @@ cd frontend
 npm install
 npm start
 ```
-
-## 🧠 Methodology
-For a deep dive into the AI architecture, RAG retrieval, and Agentic Loop, see [methodology.md](./methodology.md).

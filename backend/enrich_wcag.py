@@ -5,6 +5,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import random
 from urllib.parse import urljoin
 
 # Configuration
@@ -12,12 +13,15 @@ BASE_DIR = Path(__file__).resolve().parent
 INPUT_FILE = BASE_DIR / "wcag.json"
 OUTPUT_FILE = BASE_DIR / "wcag_enriched.json"
 
+# Global session
+session = requests.Session()
+
 def fetch_html(url):
     try:
-        # Long delay to avoid 403s
-        time.sleep(2.0)
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-        response = requests.get(url, headers=headers, timeout=15)
+        # Randomized delay
+        time.sleep(random.uniform(2.0, 5.0))
+        # Default requests/session behavior works better for W3C than fake headers
+        response = session.get(url, timeout=15)
         if response.status_code != 200:
             print(f"Warning: Fetch {url} returned status {response.status_code}")
             return None
